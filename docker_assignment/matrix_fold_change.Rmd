@@ -1,0 +1,22 @@
+--
+
+First, I initialize the 5x10 matrix with the following code
+```{r}
+x <- matrix(data = sample(1:100, 50), nrow = 5, ncol = 10)
+colnames(x) = c("cond1", "cond2", "cond3", "cond4", "cond5",
+                "ctrl1", "ctrl2", "ctrl3", "ctrl4", "ctrl5")
+rownames(x) = c("gene1", "gene2", "gene3", "gene4", "gene5")
+```
+
+Then, I got the average expression levels for each gene in the 
+control/conditional settings:
+```{r}
+cond_means <- rowMeans(x[,1:5])
+ctrl_means <- rowMeans(x[,6:10])
+```
+Finally, I calculated the fold change and outputted it as a data frame:
+```{r}
+fold_changes <- cond_means / ctrl_means
+fold_change_df <- data.frame("Gene" = paste0("gene", 1:5), "FC" = fold_changes)
+fold_change_df
+```
