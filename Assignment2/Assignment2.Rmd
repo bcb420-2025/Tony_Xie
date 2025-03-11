@@ -1,0 +1,502 @@
+---
+title: "Assignment 2"
+subtitle: "Differential Gene Expression and Preliminary ORA"
+author: "Tony Xie"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    fig_caption: yes
+bibliography: assignment2.bib
+csl: biomed-central.csl
+---
+
+ASSOCIATED JOURNAL ENTRY: (https://github.com/bcb420-2025/Tony_Xie/wiki/Entry-7:-Assignment-2-Preliminary-Notes)
+
+Before diving into the report, I first add necessary packages for later analysis:
+```{r, message=FALSE}
+
+# will be used for differential gene expression analysis, involving 
+# calculations of fold change and estimation associated statistical signifance 
+# using negative-binomial-informed linear models.
+library(edgeR)
+
+# used for volcano plot generation
+library(ggplot2)
+
+# used for aesthetic text labelling of ggplot graphs, makes sure text does not
+# cluster
+if (!requireNamespace("ggrepel", quietly = TRUE)){
+  install.packages("ggrepel")
+}
+
+library(ggrepel)
+
+# used for complex heatmap generation to view whether conditions cluster 
+# together
+library(ComplexHeatmap)
+library(circlize)
+
+# for table display
+library(knitr)
+
+# set the working directory
+setwd("/home/rstudio/projects")
+```
+
+The dataset that I will use in this report is titled "Transcriptomic study of human brain organoids in Alzheimer's Disease", with the accession id GSE266358. The original paper associated with the dataset utilized it to determine that ferroptosis---a mode of cell death distinct from apoptosis and necrosis characterized by lipid peroxidation and iron accumulation---is associated with Alzheimer's disease and its characteristic beta-amyloid plaque deposition [@majernikova2024]. The dataset contains a total of 32 samples comparing brain organoids differentiated from iPSCs possessing the PSEN1 DeltaE9 mutation (a genotypic model for Alzheimer's disease) to their isogenic controls. Each group was additionally treated with Ferrostatin (a ferroptosis inhibitor), BACE-1 (a beta amyloid inhibitor) and co-cultured with their congenic microglia. 
+
+For the scope of this report, we will focus on 8 untreated samples: 4 replicates for PSEN1 DeltaE9 mutation-possessing brain organoids without additional treatment and 4 for their isogenic controls. The annotation info generated from Assignment 1 is stored in Assignment1_sampleinfo.Rdata. It's loaded and displayed here:
+
+```{r}
+
+# Load the sample annotation data. It's stored in data frame named sample_info
+load("Assignment1_sampleinfo.Rdata")
+
+# The original annotation data (as pulled from GEOQuery) was incorrect and 
+# conflicted with the names of the sample files themselves. To obtain the
+# direction of expression changes that the authors have reported, we must flip
+# the annotations for the sample genotype. The process of discovering the 
+# necessity of this is outlined in the journal.
+sample_info$genotype[1:4] <- "Isogenic Control"
+sample_info$genotype[5:8] <- "PSEN1 Mutation DeltaE9"
+
+kable(sample_info, type = "html", caption="Table 1: Annotations for samples of interest from GEO dataset GSE266358, focusing on untreated brain organoids with the PSEN1 Delta-E9 genotype and their isogenic controls)")
+```
+
+The original RNA-seq dataset provided on GEO was in the form of raw counts and covered over 60,000 coding and non-coding genes. In the previous assignment, I filtered out lowly-expressed genes via a threshold of >= 1 CPM in at least 4 samples following the edgeR protocol, ending up with slightly over 14,500 genes. This contrasts the protocol of the original authors, who used a more relaxed threshold of >= 0.5 CPM in at least 3 samples. Potential implications for these threshold differences are briefly discussed in the "volcano plot" sections. After filtering, I applied TMM normalization to the counts using the edgeR package. TMM is sample-based and assumes that up-regulated gene numbers balance that of down-regulated genes and that the data follows a negative binomial distribution; this is ideal for RNA-seq analysis. I then mapped each gene (which all had ENSEMBL identifiers) to their corresponding HGNC symbols, and discarded the ones that did not having a matching gene symbol. The final filtered normalized count data is loaded here:
+
+```{r}
+# the count data is in a data frame named final_processed_count_data
+load("Assignment1_final_processed_counts.RData")
+
+dim(final_processed_count_data)
+```
+It's comprised of 14431 rows (representing the number of genes) and 8 rows (representing the number of samples). Here are the first ten rows:
+```{r, echo=FALSE}
+kable(final_processed_count_data[1:10,], type = "html", caption = "Table 2: Filtered counts based on a minimum of 1 CPM for at least four samples (inspired by the edgeR protocol) after TMM normalization. Eight samples are present. GSM8245590, GSM8245591, GSM8245592, GSM8245593 correspond to isogenic control replicates, whereas GSM8245606, GSM8245607, GSM8245608 and GSM8245609 correspond to PSEN1 deltaE9 mutant organoids. Each row name is a HGNC gene symbol. The first 10 rows are displayed.")
+```
+
+As a reminder, the sample ids GSM8245590, GSM8245591, GSM8245592 and GSM8245593 correspond to the isogenic controls, while the ids GSM8245606, GSM8245607, GSM8245608, and GSM8245609 correspond to the PSEN1 DeltaE9 mutants. 
+
+# Differential Gene Expression
+
+In the first assignment, I generated an MDS plot contrasting the PSEN1 DeltaE9 mutant samples with their isogenic controls as follows:
+```{r, fig.cap="*Figure 1: Multi dimensional scaling plot of filtered counts based on a minimum of 1 CPM for at least four samples (inspired by the edgeR protocol) after TMM normalization. Eight samples are present, each represented by a dot. Four untreated brain organoid samples with the PSEN1 Delta-E9 mutation are coloured dark green, while their isogenic controls are coloured blue.*"}
+# create an MDS plot (here using limma)
+limma::plotMDS(final_processed_count_data, labels=NULL, 
+               main="MDS Plot of PSEN1 Mutant Samples and their Isogenic Controls",
+               pch=1, cex = 1.5, 
+               col=c("blue", "darkgreen")[factor(sample_info$genotype)])
+
+# we create a legend for the data
+legend("topright", legend=levels(factor(sample_info$genotype)), pch=c(1), col= c("blue","darkgreen"), bty="n", cex=0.75)
+```
+
+The PSEN1 mutants cluster together to the right, whereas the isogenic controls cluster to the left. The clear separation between the two conditions in the MDS plot suggest that the expression levels between the conditions are highly distinct. This implies a high likelihood of obtaining statistically significant results through our differential gene expression analysis when defining our factors along genotype. We define our model design matrix here:
+
+```{r}
+model_design <- model.matrix(~sample_info$genotype)
+# note that model_design is a matrix---I have omitted giing it a name and only 
+# display it in the meantime.
+model_design
+```
+
+The samples harboring the PSEN1 mutation take on the factor level 1, whereas isogenic controls take on the factor level 0. Thus, the fold change results produced will represent the fold change from the isogenic control expression levels to the PSEN1 mutant levels (positive means upregulated in PSEN1 mutants). We obtain fold changes and associated statistical significance values using the Quasi Likelihood model in edgeR with the following:
+
+```{r}
+# create a new DGEList object containing the final processed count data with 
+# samples grouped by genotype
+d = DGEList(counts=as.matrix(final_processed_count_data), 
+            group=sample_info$genotype)
+
+# estimating dispersion (a feature of the NB distribution) is necessary for 
+# the calculations of fit
+d = estimateDisp(d, model_design)
+
+# we use quasi likelihood for more complicated, Bulk RNA-seq experiments
+fit = glmQLFit(d, model_design)
+qlf.genotype <- glmQLFTest(fit, coef='sample_info$genotypePSEN1 Mutation DeltaE9')
+
+# obtain every hit (note that the results are sorted by p-value)
+qlf_output_hits <- topTags(qlf.genotype, sort.by = "PValue", 
+                           n = nrow(final_processed_count_data))
+
+# shorthand the name to make referencing it in downstream analyses
+# a little easier
+qlf_out <- qlf_output_hits$table
+```
+
+Note that edgeR uses the negative binomial distribution when scoring the data. This method is specifically tailored towards RNAseq, and provides advantages over packages such as Limma. The default multiple hypothesis testing setting used by edgeR is Benjamni-Hochberg correction, which is also the method for multiple hypothesis I have opted to use in this analysis. Rationale for this is discussed in greater detail in the "Multiple Hypothesis Testing" section. Now, let's investigate the number of genes that are differentially expressed.
+
+## P-Values and Significant Differential Gene Expression
+
+Tentatively, I have decided to use a p-value threshold of 0.05, which indicates acceptance of a 5% false positive rate (where genes are falsely identified to have been significantly differentially expressed). As stated in class, this is a generally accepted, albeit arbitrary, initial cutoff used to determine significance in scientific analyses. Here, we see the number of genes in our normalized, filtered dataset meeting the threshold:
+
+```{r}
+sum(qlf_out$PValue < 0.05)
+```
+
+Given that the filtered dataset encompassed only roughly 14000 genes, this means that over a third of the genes were significantly differentially expressed, far greater than the example that Prof. Isserlin gave in class with the BRCA1 primary vs. recurrent tumor dataset. Despite the large number of significant hits, the result is unsuprising: the PSEN1 mutation replicates clustered well away from the isogonic control replicates in the MDS plot, suggesting that the expression values between the conditions are highly distinct. 
+
+Note that raw p-values are flawed for several reasons. First, they do not account for multiple hypothesis testing: the greater the number of genes tested for differential gene expression, the more likely a false positive will be encountered. This is further elaborated on in the multiple hypothesis testing section. Additionally, it may be useful to consider a fold change cutoff to account only for genes with very different magnitudes of expression between the control and test conditions (and potentially filter better for biologically meaningful results). Some have suggested a fairly relaxed fold-change cutoff of 1.5 (log fold change difference around 0.6). How many of the genes in this dataset meet this cutoff? Well:
+
+```{r}
+sum(abs(qlf_out$logFC) > 0.6)
+```
+
+We observe that a similar number of genes meet this cutoff in comparison to the p-value cutoff of 0.05. As for the overlapping set of genes that meet both thresholds: 
+
+```{r}
+sum(abs(qlf_out$logFC) > 0.6 & qlf_out$PValue < 0.05)
+```
+
+We see that the majority of significantly differentially expressed genes in terms of p-value also have drastically different fold changes (and vice versa). This intuitively makes sense; genes with high fold changes are probably more likely to have highly statistically significant results. But there are several problems with using a fold change threshold. First, the 1.5 fold change threshold is arbitrary, and many have demonstrated that fold-change cutoffs (as well as p-value cutoffs) significantly alter microarray and RNA-seq interpretations [@dalman2012]. Second, low relative expression changes may still be biologically significant: consider regulatory systems that are highly sensitive to minute expression changes. I'd like to limit the use of thresholds as much as possible, and will opt to only use the fold-change threshold for visual purposes in the volcono plot section. 
+
+## Multiple Hypothesis Testing
+
+As briefly mentioned, with a greater number of tests, the odds of a positive results occurring purely by chance increases. With over 14000 genes considered for possibly significant differential expression, I am running a very large number of tests. As covered in class, there exist various methods to deal with multiple hypothesis testing such as the Bonferonni or the Benjamni-Hochberg method. The Bonferonni method adjusts for the familywise error rate---the odds of a single false positive occurring---and is considered to be often too stringent especially in scenarios with a large number of tests (as in my case) [@chen2017]. In comparison, the Benjamni-Hochberg adjusts for the false discovery rate: the expected proportion of false positive results. 
+
+Since the downstream analysis will consist mostly of gene set enrichment analysis, having a small number of false positive results is tolerable and I'd like my analysis to be as sensitive as reasonably possible (and thus, I want to cast the net wide). Therefore, I have chosen to use BH correction. To note, it appears the BH method is one of the most widely used methods to control the FDR in computational biology practices [@korthauer2019], and using it for this analysis is a safe choice. 
+We get the number of genes in our filtered and normalized list that meets the threshold of 0.05:
+```{r}
+# filter only for results with an FDR below 0.05
+qlf_output_fdr_pass <- qlf_out[qlf_out$FDR < 0.05,]
+
+# get the number of these filtered results
+nrow(qlf_output_fdr_pass)
+
+```
+Over 3700 genes meet this threshold, and a little less than 2000 genes are removed. Again, this is fairly unsurpising, given how well the samples in the test condition clustered together in the MDS plot (an indicator of how distinct the expression levels are between the control and test conditions). 
+
+## Preliminary Discussion of Single Gene Results
+
+### Top 10 Genes in Terms of Statistical Significance (Volcano Plot) and Discussion
+
+Before we compare our edgeR differential expression results with the results from the original paper, let's first observe the distribution of the results using a volcano plot:
+```{r, warning=FALSE, fig.cap="*Figure 2: Volcano plot displaying statistical significance and fold change values of genes for which counts were filtered and normalized via TMM. Statistical significance was determined via edgeR's quasi-likelihood model. The x-axis is the logarithm of the fold change, while the y-axis is the negative logarithm of the false discovery rate. The top 10 results by FDR (adjustment via Benjamini-Hochberg correction) are displayed in blue. All other genes are displayed black. Vertical lines indicate fold-change thresholds (not enforced) of +/- log(1.5), while the horizontal line indicates an adjusted p-value threshold of 0.05.*"}
+
+# make a copy of the differential expression data
+top10_volcano_data <- qlf_out
+
+# add a "status" column
+top10_volcano_data$status <- "other"
+# designate the top 10 genes
+top10_volcano_data$status[1:10] <- "top 10 by adjusted p-value"
+
+# the two colours to use to colour the data points (blue for top 10)
+mycolours <- c("black", "blue")
+names(mycolours) <- c("other", "top 10 by adjusted p-value")
+
+# add a "text label" column to label the top 10 genes
+top10_volcano_data$text_label <- NA
+# the labels are the HGNC symbols
+top10_volcano_data$text_label[1:10] <-
+  rownames(top10_volcano_data)[1:10]
+
+# plot a volcano plot in ggplot2
+p <- ggplot(data=top10_volcano_data, aes(x=logFC,y=-log10(FDR),col=status)) + 
+  # plot the non-top 10 genes first (will be in the "background")
+  geom_point(data=top10_volcano_data[-(1:10),], alpha=0.3) +
+  # fold change line (marks fold change > |1.5|)
+  geom_vline(xintercept=c(-0.6, 0.6), col="blue") + 
+  # statistical significance line (Padj < 0.05)
+  geom_hline(yintercept=-log10(0.05), col="blue") + 
+  geom_point(data=top10_volcano_data[1:10,]) + 
+  theme_minimal() + 
+  scale_color_manual("Status", values = mycolours) + 
+  geom_label_repel(aes(label = text_label), 
+                  box.padding   = 0.35, 
+                  segment.color = 'blue', 
+                  min.segment.length = 0,
+                  max.overlaps = 30,
+                  size = 3) +
+  ylim(c(-1, 10))
+  # add clear labels
+p
+
+```
+
+From the plot, it is clear that many genes pass both the fold change and statistical significance threhsolds. The top 10 results in terms of statistical significance are highlighted in blue. The majority of the upregulated genes in the top 10 (TFAP2A, NEUROD1, POU4F1, EN2) are implicated in neural development [@gao2009] [@zou2012] [@genestine2015]. Given the prevalent role of wild type PSEN1 in early neurogenesis and the complicated, not necessarily loss-of-function nature of the delta E9 mutation, this may be indicative of dysfunctional development in PSEN1 deltaE9 mutant brain organoids  [@woodruff2013] [@hernandez2022]. It is, at least, encouraging that most of the genes are specific to the nervous system. 
+
+GABRA1, the gene that is the most downregulated among the top 10, has also been shown to be downregulated in other transcriptional studies of Alzhiemer's [@hill2022]. GABRA1 is a GABA receptor, and reductions in GABA signalling has been shown to contribute to congitive impairment seem in AD [@solas2015]. Thus, its significant differential expression is a good sign of the validity of the RNAseq data.
+
+### Single-Gene Relation to Ferroptosis and the Main Aims of the Original Paper (Volcano Plot)
+
+Now, let us see if these preliminary differential expression results match the results of paper from which the data was obtained. Majernikova et al. focused on genes involved in ferroptosis-related pathways [@majernikova2024]. Ferroptosis is a type of cell death characterized by iron accumulation and lipid peroxidation [@li2020], and the authors aimed to determine a) whether ferroptosis is associated with Alzheimer's disease pathogenesis (as suggested by previous cell culture and animal studies) and b) whether ferroptosis was associated with beta amyloid accumulation. Aside from showing alterations in ferroptosis-protein expression in post-mortem tissue of Alzheimer's patients, the authors demonstrated differential ferroptosis-related gene expression between 100 day-old brain organoids grown in an AD pathogenesis mutant background (PSEN1 DeltaE9) and their isogenic controls. 
+
+In total, they identified 14 ferroptosis-related differentially expressed (FRDE) genes meeting a multiple-hypothesis testing cutoff of 0.05. [@majernikova2024] Upregulated genes included SAT1---a rate limiting enzyme involved in polyamine catabolism (and thus induction of lipid peroxidation) [@ou2016]---, HMOX1, and TP53, among others. Some downregulated genes included GCH1 and PRNP. The full list is in "paper_DE_ferroptosis_genes.txt". 
+
+We obtain a vector of these ferroptosis-related differentially expressed genes here:
+
+```{r}
+# read file containing significantly differentially expressed ferroptosis genes
+ferroptosis_genes <- read.table(file.path(getwd(),
+                                          "paper_DE_ferroptosis_genes.txt"), 
+                                          header = TRUE)
+
+# convert the data frame to a single vector containing the gene names
+ferroptosis_genes <- ferroptosis_genes$significantly_de_genes
+
+```
+
+The authors performed their differential gene expression analysis with DESEQ2 [@majernikova2024]. As mentioned in lecture, DESEQ2 relies upon similar assumptions to edgeR (e.g., using negative bionomial generalized linear models, similar number of upregulated and downregulated genes), and should produce similar results. Aside from the edgeR / DESEQ2 difference between my analysis and the authors', it's important to note that they used a cutoff of 0.5 cpm in 3+ samples to filter out lowly expressed genes, whereas I abided by a stricter cutoff requirement of 1 cpm in 4+ samples as outlined by the edgeR protocol. Considering the different low-expression filters used, we first see how many of the 14 DE ferroptosis-related genes are in our filtered dataset:
+```{r}
+
+overlap_filter_check <- 
+  rownames(final_processed_count_data) %in% ferroptosis_genes
+
+sum(overlap_filter_check)
+```
+
+Thus, our low-expression filter did not filter anything the authors found significant. Given the similarities between DESEQ2 and edgeR count normalization and differential expression, we should expect to see most or all of the FRDE genes passing our Benajmni-Hochberg corrected threshold of 0.05:
+
+```{r}
+# get the indices of the rows with gene names matching the significantly 
+# differentially expressed ferroptosis-related genes as outlined in the original 
+# paper
+overlap_FDR_check <- which(rownames(qlf_output_fdr_pass) %in% 
+  ferroptosis_genes)
+
+length(overlap_FDR_check)
+```
+
+Only one of the FRDE genes didn't pass. Generating a table of relevant values based on the edgeR analysis that I conducted:
+
+```{r}
+# get all rows that represent FRDE genes
+all_FRDE_rows <- which(rownames(qlf_out) %in% ferroptosis_genes)
+
+# dispaly in table
+kable(qlf_out[all_FRDE_rows,], type="html", caption="*Table 3: Fold change and statistical significance values for ferroptosis-related differentially expressed (FRDE) genes identified by the original authors. Raw counts were filtered with an cutoff of >= 1 CPM in at least 4 samples and normalized via TMM. Statistical significance was determined via edgeR's quasi-likelihood model. The FDR represents Benjamini-Hochberg correction*")
+
+```
+We see that the only FRDE gene that did not pass the adjusted p-value threshold was SAT2, with an FDR value of around 0.13. The significance of the 13 FRDE genes passing the adjusted p-value threshold is discussed in a later section. 
+
+Now, we generate a volcano plot visualizing the statistical significance and fold-change of each gene, this time emphasizing the FRDE genes to see where they place among the rest:
+
+```{r, warning=FALSE, fig.cap="*Figure 3: Volcano plot displaying statistical significance and fold change values of genes for which counts were filtered and normalized via TMM. Statistical significance was determined via edgeR's quasi-likelihood model. The x-axis is the logarithm of the fold change, while the y-axis is the negative logarithm of the false discovery rate. Ferroptosis-related differentially expressed (notated FRDE) genes identified by the original authors are displayed in red. All other genes are displayed black. Vertical lines indicate fold-change thresholds (not enforced) of +/- log(1.5), while the horizontal line indicates an adjusted p-value threshold of 0.05.*"}
+
+# make a copy of the differential expression data
+FRDE_volcano_data <- qlf_out
+
+# add a "gene type" column
+FRDE_volcano_data$gene_type <- "other"
+# designate statistically significant (from the original paper) 
+# ferroptosis-related genes
+FRDE_volcano_data$gene_type[all_FRDE_rows] <- "FRDE"
+
+# the two colours to use to colour the data points (red for FRDE)
+mycolours <- c("black", "red")
+names(mycolours) <- c("other", "FRDE")
+
+# add a "text label" column to label the FRDE genes
+FRDE_volcano_data$text_label <- NA
+# the labels are the HGNC symbols
+FRDE_volcano_data$text_label[all_FRDE_rows] <-
+  rownames(FRDE_volcano_data)[all_FRDE_rows]
+
+# plot a volcano plot in ggplot2
+p <- ggplot(data=FRDE_volcano_data, aes(x=logFC,y=-log10(FDR),col=gene_type)) + 
+  # plot the non-FRDE genes first (will be in the "background"), 
+  # with some transparency
+  geom_point(data=FRDE_volcano_data[-all_FRDE_rows,], alpha=0.3) +
+  # fold change line (marks fold change > |1.5|)
+  geom_vline(xintercept=c(-0.6, 0.6), col="blue") + 
+  # statistical significance line (Padj < 0.05)
+  geom_hline(yintercept=-log10(0.05), col="blue") + 
+  geom_point(data=FRDE_volcano_data[all_FRDE_rows,]) + 
+  theme_minimal() + 
+  scale_color_manual("Gene Type", values = mycolours) + 
+  # add clear labels
+  geom_label_repel(aes(label = text_label), 
+                  box.padding   = 0.35, 
+                  segment.color = 'red', 
+                  min.segment.length = 0,
+                  max.overlaps = 30,
+                  size = 3) 
+
+p
+```
+
+Although nearly all of FRDE genes meet the baseline significance cutoff, it is discouraging to see that most of them (aside from a few exceptions such as SAT1 and PRNP) cluster closer to the middle and bottom of the volcano plot. Plus, FRDE genes only comprise the subset of genes that the authors found met their Padj cutoff, and all other ferroptosis-related genes are likely below the horizontal blue line. This suggests that pathways other than ferroptosis may be significantly more enriched in the transcriptional changes induced by the PSEN1 DeltaE9 mutation. The authors in the original paper focus on ferroptosis, and use a wealth of other approaches to demonstrate the connection between beta amyloid deposition, ferroptosis and AD, but the conclusions from their RNAseq data may not be the strongest. This is discussed in greater detail in the gene set enrichment analysis section.
+
+## Heatmap of the Data
+
+To generate a heatmap of the data enabling the determination of whether the conditions cluster together, we first obtain rows for all significantly differentially expressed genes (Benjamini-Hochberg FDR < 0.05) and scale them (to better fit a color palette) as follows: 
+```{r}
+# make a copy of the filtered and normalized count data
+heatmap_matrix <- final_processed_count_data
+
+# get the names of all genes that met the multiple hypothesis 
+# testing-corrected cutoff
+top_hits <- rownames(qlf_output_fdr_pass)
+
+# a series of multiple steps, including:
+# 1) getting all rows of counts from significantly DE genes
+# 2) transposing it into a matrix
+# 3) scaling the values (subtracting by the mean and dividing by the SD/variance)
+# 4) transposing it again
+heatmap_matrix_tophits <- t(
+  scale(
+    t(heatmap_matrix[rownames(heatmap_matrix) %in% top_hits,])))
+
+# establish the colours for the heatmap (blue for "negative" scaled values, 
+# red for positive ones)
+heatmap_col = colorRamp2(
+  c(min(heatmap_matrix_tophits), 0, max(heatmap_matrix_tophits)),
+  c("blue", "white", "red"))
+
+```
+
+Then, we create an annotation object for our sample conditions, and generate the actual heatmap itself, clustered both by row and by column:
+```{r, fig.cap="*Figure 4: Heatmap displaying filtered count values after TMM normalization and scaling, clustered by gene and sample. Blue indicates lower relative expression whereas red indicates higher relative expression. Only genes with differential expression surpassing a statistical significance threshold of 0.05 (Benjamini-Hochberg correction), as determined via edgeR's quasi-likelihood model, are included in the heatmap. Isogenic control samples are indicated by a light blue bar, whereas PSEN1 deltaE9 mutants are indicated with light green.*"}
+
+# colours to distinguish the conditions
+genotype_cols <- c("lightblue", "lightgreen")
+
+# names corresponding to each color is the genotype of the condition
+names(genotype_cols) <- unique(sample_info$genotype)
+
+# create a Heatmap Annotation object based on the above info
+heatmap_annotation <- HeatmapAnnotation(
+  df = data.frame(genotype = sample_info$genotype),
+  col = list(genotype = genotype_cols),
+  show_legend = TRUE)
+
+
+current_heatmap <- Heatmap(as.matrix(heatmap_matrix_tophits),
+                           # annotation distinguishing conditions
+                           top_annotation = heatmap_annotation,
+                           # cluster by gene
+                           cluster_rows = TRUE,
+                           # cluster by sample
+                           cluster_columns = TRUE,
+                           show_row_dend = TRUE,
+                           show_column_dend = TRUE,
+                           col=heatmap_col,
+                           show_column_names = FALSE,
+                           show_row_names = FALSE,
+                           show_heatmap_legend = TRUE,
+                           heatmap_legend_param = list(title = 
+                                                         "Relative Expression"),
+                           row_title = "Genes",
+                           column_title =("Top hits PSEN1-DeltaE9 mutation vs
+                                          wildtype")
+                           )
+
+# display the heatmap
+current_heatmap
+
+```
+
+From the heatmap annotation colouring, it is easy to tell that the control and test condition expression levels cluster together separately. The division is so visually obvious that "four quadrants" coloured red and blue are defined, in which downregulated genes in one replicate are similarly down regulated in all other replicates of the same condition (and the same is true for upregulated genes). 
+
+# Threshold Overrepresentation Analysis
+
+## What method am I using, and why? 
+
+For threshold overrepresentation analysis, I have chosen to use g:Profiler. This is due to several reasons. First, g:Profiler contains large, up-to-date, built-in gene sets that are useful for preliminary overrpresentation analyses to cover a wide variety of biological processes. Some of these annotation curation sets including the Gene Ontology (GO), Reactome, WikiPathways, and KEGG, among others [@kolberg2023]. The impact of outdated gene annotations on pathway enrichment analysis is highly significant [@wadi2016], and should not be ignored. g:Profiler follows a quarterly release cycle (following Ensembl), with frequent data updates contrasting other popular but often out-of-date programs. Furthermore, g:Profiler allows the user to input custom gene sets, and I will also take advantage of this flexibility later in the analysis.
+
+To note, although thresholded lists are easy and quick to use, they pose a major disadvantage in that the thresholds used are ultimately arbitrary. If, for example, we were to use a p-value < 0.05 cutoff, we may ignore pathways with individually insigificantly expressed genes but overall strong enrichment, something that is important to consider.
+
+## What annotation datasets am I using, and why?
+
+I will be using KEGG (Kyoto Encyclopedia of Genes and Genomes). KEGG is manually curated by a professional team at Kanehisa laboratories, who base their annotations off of published research articles [@kanehisa2017]; given this, it is likely that the annotations from KEGG are more accurate than ones that are mainly computationally defined. Based on their release notes, it appears KEGG updates its FTP site weekly (although the FTP is unfortunately only available to subscribers). I am most interested in the KEGG PATHWAY database, which includes a gene set representing ferroptosis and ferroptosis-related genes. This can be used to determine whether ferroptosis-related genes are actually overrrepresented in our differentially expressed genes. Aside from ferroptosis, the KEGG PATHWAYS database encompass metabolism, cellular processes, human diseases, organismal systems and the like [@kanehisa2017], and will be useful for characterizing---on a broad level---differentially regulated pathways within our RNA-seq dataset. I will be accessing the KEGG PATHWAYS gene sets through g:Profiler, which contains the 2024-01-22 version from a little more than a year ago.
+
+## Preparing The Thresholded Lists
+
+Using a Benjamni-Hochberg corrected p-value of 0.05, I  create three thresholded lists: one for up-regulated genes, one for down-regulated genes, and one for all differentially expressed genes:
+
+```{r}
+# up-regulated genes have a log fold change above 0
+upregulated_genes <- rownames(qlf_out)[
+  qlf_out$FDR < 0.05 & qlf_out$logFC > 0]
+
+# downregulated genes have a log fold change below 0
+downregulated_genes <- rownames(qlf_out)[
+  qlf_out$FDR < 0.05 & qlf_out$logFC < 0]
+
+# differentially expressed genes only need an FDR cutoff
+significant_genes <- rownames(qlf_out)[
+  qlf_out$FDR < 0.05]
+
+# write the up-regulated genes to a new file
+write.table(x=upregulated_genes, file = file.path(getwd(), "psen1_mutant_upregulated_genes.txt"), col.names = FALSE, quote = FALSE)
+
+# write the down-regulated genes to a new file
+write.table(x=downregulated_genes, file = file.path(getwd(), "psen1_mutant_downregulated_genes.txt"), col.names = FALSE, quote = FALSE)
+
+# write all differentially expressed genes to a new file
+write.table(x=significant_genes, file = file.path(getwd(), "psen1_mutant_sig_genes.txt"), col.names = FALSE, quote = FALSE)
+```
+
+## Running the Overrepresenation Analysis
+
+I have opted to run the overrepresentation analysis using the web version of g:Profiler. All results presented will be in the form of screenshots. The significance threshold used is a Benjamini-Hochberg FDR of 0.05. 
+
+### Analysis and Discussion of Up-regulated genes in the PSEN1 Delta9 Mutants
+
+Using the file "psen1_mutant_upregulated_genes.txt" as the query, g:Profiler returned a total of 154 overrepresented annotation gene sets. The top 20, along with "Alzheimer Disease" are shown, with an accompanying figure caption below:
+
+```{r, echo=FALSE, fig.cap="*Table 4: Top 20 overrepresented gene sets (and Alzheimer Disease at the bottom) from the KEGG PATHWAY database given an input query of up-regulated genes from an RNAseq dataset comparing PSEN1 DeltaE9 mutant brain organoids to their isogenic controls. Differential expression analysis was conducted using edgeR's quasi-likelihood model, and up-regulated genes in the gene list were selected based an adjusted p-value threshold (Benjamini-Hochberg correction) of 0.05 and log fold change > 0. Term names, Term IDs, adjusted p-values and their log equivalents, gene set size (T), size of the effective gene list (Q), overlap (T & Q), and the number of genes in the background (U) are displayed as columns. *"}
+knitr::include_graphics(file.path("figures/up_KEGG.png"))
+```
+
+Before we begin discussing the enriched gene sets in the up-regulated list, it's important to note that the "ferroptosis" gene set did not meet the minimum statistical significance threshold. This is discussed in the "Ferroptosis Interpretations" section. 
+
+The enrichment of "Alzheimer Disease" (not in the top 20 but still significantly enriched) makes immediate sense given that PSEN1 DeltaE9, the background mutation for the brain organoids in the test condition, is strongly associated with Alzheimer's disease. "Apoptosis" is also enriched (top 4), which also makes sense given that previous literature has established a strong connection between apoptosis and Alzheimer's disease. To note, some of the other enriched gene sets---"Hippo signalling pathway" and "p53 signaling pathway" in particular---are also related to apoptosis.
+
+To elaborate more on the relevance of the enriched "Apoptosis" gene set, we must understand the mechanism by which the DeltaE9 mutation induces Alzheimer's-like symptoms. PSEN1 is the catalytic subunit of the gamma-secretase complex, responsible for cleaving amyloid precursor protein (APP) into beta amyloid. Long argued to be a gain-of-function mutation which increased the production of beta amyloid, PSEN1 DeltaE9 was more recently discovered to instead be a dominant negative mutation dysregulating the function of the gamma-secretase complex, favoring the production of more toxic forms of beta amyloid (such as AB42). Beta amyloid has been demonstrated to induce neuronal apoptosis by downregulating anti-apoptotic genes such as Bcl-w [@yao2005]. Furthermore, apoptosis has also been characterized as a major driver of cell death in the brains of Alzheimer's patients[@kumari2023]. Thus, it is unsuprising that brain organoids generated in the PSEN1 DeltaE9 background upregulate the pathways related to apoptosis. 
+
+However, other enriched gene sets, such as "Pathways in Cancer" (first on the list), and other cancer-related gene sets like "Non Small Cell Lung Cancer" and "Chronic Myeloid Leukemia" are a little more difficult to explain. Cancer and Alzheimer's disease has long been thought to have an inverse correlation [@zablocka2021]. After all, Alzheimer's induces widespread neurodegeneration whereas cancer is characterized by uncontrolled proliferation. Despite their different outcomes, both diseases regulate the same signalling pathways. Alzheimers disease commonly features mechanisms that upregulate p53 and Hippo while downregulating Pin1 to induce apoptosis [@zablocka2021]; for cancer; the reverse occurs to increase tumor development. It is perhaps these shared pathways that cause the enrichment of the PSEN1 DeltaE9 up-regulated gene list in cancer-related genes. Cancer-related genes do not necessarily only include cancer drivers; inhibitors are likely present in these gene sets as well. 
+
+One other interesting enriched gene set to note is the "cGMP-PKG signalling pathway". The cGMP pathway is heavily implicated in driving synaptic plasticity and memory processes. In particular, previous literature has established that the pathway is downregulated during aging and neurodegenerative disorders and negatively affected by amyloid beta deposition [@tropea2022]. Thus, it is strange to see that cGMP-PKG signalling pathway-related genes are upregulated in PSEN1 DeltaE9 mutants. Perhaps we can apply the same logic as we applied for the enriched cancer sets here: it is inhibitors of the pathway that are upregulated, which is why the set appears enriched here. 
+
+### Analysis and Discussion of down-regulated genes in the PSEN1 Delta9 Mutants
+
+Using the file "psen1_mutant_downregulated_genes.txt" as the query, g:Profiler returned a total of 157 overrepresented annotation gene sets. The top 20, along with "Alzheimer Disease" are shown, with an accompanying figure caption below:
+
+```{r, echo=FALSE, fig.cap="*Table 5: Top 20 overrepresented gene sets (and Alzheimers Disease) from the KEGG PATHWAY database given an input query of down-regulated genes from an RNAseq dataset comparing PSEN1 DeltaE9 mutant brain organoids to their isogenic controls. Differential expression analysis was conducted using edgeR's quasi-likelihood model, and up-regulated genes in the gene list were selected based an adjusted p-value threshold (Benjamini-Hochberg correction) of 0.05 and log fold change < 0. Term names, Term IDs, adjusted p-values and their log equivalents, gene set size (T), size of the effective gene list (Q), overlap (T & Q), and the number of genes in the background (U) are displayed as columns. *"}
+knitr::include_graphics(file.path("figures/down_KEGG.png"))
+```
+
+Before we begin discussing the enriched gene sets in the down-regulated list, it's important to note that the "ferroptosis" gene set did not meet the minimum statistical significance threshold. This is discussed in the "Ferroptosis Interpretations" section. 
+
+Interestingly, many of the enriched gene sets are related to synaptic activity ("Dopaminergic synapse", "Neuroactive ligand-receptor interaction", "Ampetamine addiction", "Synpatic vesicle cycle", "GABAergic synapse). This corresponds well with the wealth of literature suggesting that high levels of beta amyloid cause synaptic dysregulation [@zhang2022]. 
+
+Reading the literature regarding some of these gene sets individually, we see that the dopaminergic system itself is heavily associated with Alzheimer's disease: dopaminergic neuron degeneration and reduced levels of dopamine trasporter levels at synaptic terminals is a driver of cognitive decline in Alzheimer's patients [@zhang2025]. Furthermore, downregulation of GABA has also been heavily associated with cogntive decline in Alzheimer's, particularly in the realm of working memory. [@mandal2017] Thus, it makes sense that the downregulated gene list in PSEN1 deltaE9 mutants is enriched in dopaminergic and GABA-related genes. 
+
+The cGMP-PKG signalling pathway is also enriched here. As previously mentioned, the cGMP pathway is heavily implicated in driving synaptic plasticity and memory processes and neagtively affected by beta amyloid deposition [@tropea2022]. Thus, it makes sense that cGMP-PKG signalling pathway proteins are downregulated in PSEN1 deltaE9 mutants (in which abherrant beta amyloid deposition is induced). The enrichment of this pathway in both the upregulated and downregulated gene lists suggests that the inhibitors of the pathway are overrepresented in one list, whereas the activators the pathway are overrepresented in the other (it would not make sense for activators of the pathway to both be upregulated and downregulated).
+
+One last observation: aldosterone synthesis and salivary secretion are enriched in both the up-regulated and downregulated gene lists, but no literature attributes amyloid beta deposition or Alzheimer's as a causative or inhibitory factor for either. In fact, there exist many enriched gene sets that can't seem to be explained by existing studies. Perhaps this points to a current gap in scientific knowledge, faultiness in the brain organoid model to accurately represent Alzheimer's disease, or enriched sets that may not actually have biological significance to the study at hand. 
+
+### Analysis and Discussion of differentially expressed genes for PSEN1 deltaE9 mutants
+
+Using the file "psen1_mutant_all_genes.txt" as the query, g:Profiler returned a total of 209 overrepresented annotation gene sets. The top 20 are shown, with an accompanying figure caption below:
+
+```{r, echo=FALSE, fig.cap="*Table 6: Top 20 overrepresented gene sets (along with Alzheimers Disease) from the KEGG PATHWAY database given an input query of differentially regulated genes from an RNAseq dataset comparing PSEN1 DeltaE9 mutant brain organoids to their isogenic controls. Differential expression analysis was conducted using edgeR's quasi-likelihood model, and differentially regulated genes in the gene list were selected based an adjusted p-value threshold (Benjamini-Hochberg correction) of 0.05. Term names, Term IDs, adjusted p-values and their log equivalents, gene set size (T), size of the effective gene list (Q), overlap (T & Q), and the number of genes in the background (U) are displayed as columns. *"}
+knitr::include_graphics(file.path("figures/all_KEGG.png"))
+```
+
+The vast majority of the genes in the top 20 here are also present in the enriched gene sets corresponding to the upregulated and downregulated gene lists. The gene set "Pathways in Cancer" is extremely overrepresented, suggesting that both activators and inhibitors of cancer pathways are differentially expressed in PSEN1 deltaE9 mutants. As previously mentioned, this makes sense given the regulation of apoptotic and cell-cycle pathways by both cancer and Alzheimer's. 
+
+Here, PI3K-Akt signalling jumps close to the top. In literature, the pathway regulates cell survival and profileration and is involved in many aspects of cancer. Specifically, PI3K-Akt has a neuroprotective effect, and  dysregulation of PI3K-Akt signalling (in particular, down-regulation) results in Tau hyperphosphorylation and neurodegeneration [@kumar2022]. The enrichment of the signalling pathway here (but not as high for solely the down-regulated or up-regulated gene lists) suggests that PSEN1 deltaE9 mutants both up-regulate a large number PI3K-Akt inhibitors and down-regulate PI3K-Akt activators. 
+
+A wide variety of other gene sets are enriched, posing topics for future discussion. 
+
+### What about ferroptosis and the authors' original aims?
+
+The ferroptosis-related gene set failed to be enriched in any of the up-regulated, down-regulated or general differential expression gene lists. This suggests that the expression of the pathway as a whole is not significantly differentially expressed in PSEN1 deltaE9 mutants. Note that this does NOT conclusively suggest that ferroptosis is NOT associated with Alzheimer's disease, though. 
+
+FIrst, it's possible that the brain organoid models fail to accurately model clinical manifestations of Alzheimer's disease. In the original paper, the authors first conducted differential gene expression analyses on neural progenitors differentiated from iPSCs and discovered that many ferroptosis-inducing genes were actually downregulated in cells possessing the PSEN1-DeltaE9 mutation [@majernikova2024]. They also investigated the relationship between Alzheimer's disease pathology (extent of degeneration) and ferroptosis-related gene expression using publically available datasets, and discovered that ferroptosis was associated with increased degeneration [@majernikova2024]. Both lines of evidence point to the possibility that the brain organoids were simply not mature enough to express high levels of ferroptosis-related genes. 
+
+An alternative to the above is the possibility that the heightened expression of only a few ferroptosis-related genes is sufficient to induce ferroptosis. Just like how single gene expression analyses may fail to identify strongly up-regulated pathways composed of many individually weak gene signals [@subramanian2005], gene set enrichment analysis may fail to detect significance in biological situations where altered expression of a limited number of genes alone induces profound consequences. Although a strange proposition, this hypothesis is supported by some evidence. First, the authors presented  metabolic evidence that ferroptosis-related processes were  up-regulated in 50-day-old brain organoids possessing the PSEN1 deltaE9 background. PSEN1 deltaE9 organoids featured significantly greater levels of 4-HNE, a byproduct of lipid peroxidation, and treatment with ferrostatin-1 (a ferroptosis inhibitor) was sufficient to revert 4-HNE back to wild type [@majernikova2024]. Furthermore, ferritin levels were down-regulated in the mutant organoids (lack of iron storage is associated with ferroptosis), but reverted back up once ferrostatin was introduced [@majernikova2024]. Going back to our preliminary analysis of the FRDE genes with the volcano plot, SAT1 had both high statistical significance and positive fold change. Interestingly, SAT1 is the rate-limiting enzyme in polyamine catabolism (for lipid peroxidation) [@ou2016], and it is possible that greater expression of SAT1, along with only a couple other ferroptosis-related genes, is sufficient in inducing ferroptosis. This is definitely a reach, though, and I believe it is safer to follow the "non-mature brain organoid" hypothesis.
+
+# Section to Assignment Question
+
+The "Differential Gene Expression" and "Threshold Overrepresentation Analysis" headings correspond to the major categories of Assignment 2. Each subheading (e.g., Multiple Hypothesis) represents my answer to a single question. The only exceptions are the "Analysis and Dicussion of___" subheadings, which combined answer the 4th threshold overrepresentation question plus the interpretation questions. 
+
+# Reference List
+
