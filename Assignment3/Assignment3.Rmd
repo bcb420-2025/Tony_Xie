@@ -1,0 +1,435 @@
+---
+title: "Assignment 3"
+subtitle: "Data set Pathway and Network Analysis"
+author: "Tony Xie"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 4
+    fig_caption: yes
+bibliography: assignment3.bib
+csl: biomed-central.csl
+---
+
+ASSOCIATED JOURNAL ENTRY: (https://github.com/bcb420-2025/Tony_Xie/wiki/Entry-10:-Assignment-3)
+
+Before diving into the report, I first add the following necessary package(s):
+
+```{r}
+# RCurl is used to downloaded the most up-to-date Human GMT files from the Bader # lab for the purposes of Gene Set Enrichment Analysis
+tryCatch(expr = { library("RCurl")}, 
+         error = function(e) {  
+           install.packages("RCurl")}, 
+         finally = library("RCurl"))
+
+# for table display
+library(knitr)
+
+
+# Set the working directory (IMPORTANT: I assume that the projects folder 
+# corresponds to the Assignments3 folder):
+setwd("/home/rstudio/projects")
+
+```
+
+I've also used many cytoscape apps in addition to the base functionality, and I refer to and cite them later on.
+
+# Summary of Assignments 1 and 2
+
+The dataset that I've examined across the past couple reports is titled "Transcriptomic study of human brain organoids in Alzheimer's Disease." Found on the GEO database, its associated ID is GSE266358. The complete dataset contains 32 samples, with 4 replicates each for 8 distinct conditions. Brain Organoids and iPSCs with the PSEN1 DeltaE9 mutation (a genotypic model for Alzheimer's disease) were compared against their isogenic controls, and each group was additionally treated with Ferrostatin (a ferroptosis inhibitor) and BACE-1 (a beta amyloid inhibitor). The authors used the complete dataset to address whether ferroptosis --- a distinct type of cell death characterized by iron accumulation and lipid peroxidation --- is associated with Alzheimer's disease and the beta amyloid deposition thought to cause it [@majernikova2024]. 
+For my reports, I've narrowed down the focus to two conditions: brain organoids with the PSEN1 DeltaE9 mutation against their isogenic controls. There are four replicates per condition, and a total of 8 samples. The annotations for each sample are loaded and displayed here (code taken from Assignment 2):
+
+```{r}
+# Load the sample annotation data. It's stored in data frame named sample_info
+load("Assignment1_sampleinfo.Rdata")
+
+# The original annotation data (as pulled from GEOQuery) was incorrect and 
+# conflicted with the names of the sample files themselves. To obtain the
+# direction of expression changes that the authors have reported, we must flip
+# the annotations for the sample genotype. The process of discovering the 
+# necessity of this is outlined in the journal.
+sample_info$genotype[1:4] <- "Isogenic Control"
+sample_info$genotype[5:8] <- "PSEN1 Mutation DeltaE9"
+
+kable(sample_info, type = "html", caption="Table 1: Annotations for samples of interest from GEO dataset GSE266358, focusing on untreated brain organoids with the PSEN1 Delta-E9 genotype and their isogenic controls)")
+```
+
+The original RNA-seq dataset provided on GEO was in form of raw counts, covering over 60,000 genes. Lowly-expressed genes were filtered out with a threshold of >=1 CPM in at least 4 samples (following edgeR protocol), and slighly over 14,500 genes remained. I normalized the counts for these remaining genes using the TMM method specified in edgeR, and mapped them to HGNC symbols for readability (they initially had ENSEMBL ids). The ones that did not map to gene symbol swere discarded. 
+
+Prior to differential gene expression analysis, I first generated an MDS plot contrasting the PSEN DeltaE9 mutatns with the isogenic controls as follows: 
+
+```{r, echo=FALSE, fig.cap="*Figure 1: Multi dimensional scaling plot of filtered counts based on a minimum of 1 CPM for at least four samples (inspired by the edgeR protocol) after TMM normalization. Eight samples are present, each represented by a dot. Four untreated brain organoid samples with the PSEN1 Delta-E9 mutation are coloured dark green, while their isogenic controls are coloured blue. *"}
+knitr::include_graphics(file.path("figures/summary_MDS_plot.png"))
+```
+
+Each condition (mutant vs. control) clustered very well individually and far apart from the other, suggesting that, a) the expression values for each condition were distinct, and b) that a large number of the genes would be identified as significantly differentially expressed. 
+
+Fold changes and associated statistical significance values were obtained via edgeR's quasi-likelihood model, and Benjamni-Hochberg correction was used to determine the false discovery rate. The differential gene expression data is loaded here: 
+
+```{r}
+# load the p-values, FDR and fold change calculated via edgeR's quasi likelihood
+# method as done in A2
+load("A2_QLF_results.RData")
+# note that the stored data frame has the name "qlf_out"
+```
+
+It's stored in a data frame labelled "qlf_out." Here are the first 10 rows:
+
+```{r}
+kable(qlf_out[1:10,], type = "html", caption = "Table 2: Fold change and assiocated statistical significance values calculated using edgeR's quasi-likelihood method for 10 select genes. Raw counts were obtained from GEO dataset GSE266358, focusing on untreated brain organoids with the PSEN1 Delta-E9 genotype and their isogenic controls. Lowly expressed genes with < 1 CPM in > 4 samples were filtered out, and the remaining genes were normalized using edgeR's TMM method assuming a negative binomial distribution of RNA-seq reads.")
+```
+
+Over 3700 genes met an FDR threshold of 0.05 (unsuprising, given how well each condition clustered together).
+
+The authors originally identified 13 ferroptosis-related differentially expressed (FRDE) genes when comparing brain organoids with the PSEN1-DeltaE9 mutation against their isogenic controls [@majernikova2024]. Among the FRDE genes, the ferroptosis inhibitors were notably downregulated, while ferroptosis inducers were up-regulated; the authors used this as evidence that ferroptosis was indeed heightened during Alzheimer's. 
+
+I checked to see if the author's findings matched my own analysis. 12 of the 13 FRDE genes passed the FDR threshold of 0.05 (as expected), and a volcano plot of their position amongst the rest of the genes is displayed here:
+
+```{r, echo=FALSE, fig.cap="*Figure 2: Volcano plot displaying statistical significance and fold change values of genes for which counts were filtered and normalized via TMM. Statistical significance was determined via edgeR’s quasi-likelihood model. The x-axis is the logarithm of the fold change, while the y-axis is the negative logarithm of the false discovery rate. Ferroptosis-related differentially expressed (notated FRDE) genes identified by the original authors are displayed in red. All other genes are displayed black. Vertical lines indicate fold-change thresholds (not enforced) of +/- log(1.5), while the horizontal line indicates an adjusted p-value threshold of 0.05. *"}
+knitr::include_graphics(file.path("figures/summary_FRDE_volcano.png"))
+```
+
+Unfortunately, it was discouraging to see that most of the FRDE genes fell in the middle of the pack, with many other genes that were signfiicantly more upregulated/downregulated. In Assignment 2, this suggested to me that other pathways were significantly more perturbed and perhaps more biologically significant in inducing the differences between Delta E9 mutants and their isogenic controls. The original paper did use a myriad of other techniques to support their findings that ferroptosis _is_ associated with beta amyloid deposition and Alzheimer's disease [@majernikova2024], but their line of reasoning from RNA-seq may not have been their strongest. 
+
+## Summary of Thresholded Overrepresentation Analysis (Assignment 2)
+
+I used the gene sets provided in KEGG's PATHWAYS database for thresholded overrepresentation analysis with g:Profiler [@kolberg2023]. KEGG PATHWAYS contains a ferroptosis gene set, and I was interested in seeing whether it would be enriched. The database also encompasses a broad range of other pathways [@kanehisa2017], allowing me to identify general shifts in gene expression patterns. 
+
+Inputting the list of genes with positive log fold change (in other words, up-regulated genes) and FDR < 0.05 into g:Profiler, I obtained a total of 154 overrpresented annotated gene sets. The top 20 are displayed below:
+
+```{r, echo=FALSE, fig.cap="*Table 3: Top 20 overrepresented gene sets (and Alzheimer Disease at the bottom) from the KEGG PATHWAY database given an input query of up-regulated genes from an RNAseq dataset comparing PSEN1 DeltaE9 mutant brain organoids to their isogenic controls. Differential expression analysis was conducted using edgeR's quasi-likelihood model, and up-regulated genes in the gene list were selected based an adjusted p-value threshold (Benjamini-Hochberg correction) of 0.05 and log fold change > 0. Term names, Term IDs, adjusted p-values and their log equivalents, gene set size (T), size of the effective gene list (Q), overlap (T & Q), and the number of genes in the background (U) are displayed as columns. *"}
+knitr::include_graphics(file.path("figures/thresholded_up_KEGG.png"))
+```
+
+Among the most enriched gene sets were "Apoptosis" (top 4) and "Pathways in Cancer" (first on the list). The former makes sense given that previous literature has established apoptosis as a driving factor for cell death in Alzheimers patients [@yao2005]. In particular, the PSEN1 DeltaE9 mutation dysregulates the function of the gamma-secretase complex---responsible for cleaving APP into beta amyloid---and induces the toxic formation of beta amyloid such as (AB42) [@woodruff2013], which downregulates anti-apototic genes such as Bcl-w [@yao2005]. 
+
+The up-regulation of cancer-related gene sets was more of a mystery, given the inverse correlation between cancer and Alzheimer's and their opposing phenotypes (widespread proliferation vs. neurodegeneration). In assignment 2, I attributed the enrichment of cancer-related gene sets to the overlapping genes affected in both cancer and Alzheimer's signalling pathways (such as HIPPO, p53) [@zablocka2021], albeit in drastically different directions.
+
+Inputting the list of genes with negative log fold change (in other words, downregulated-regulated genes) and FDR < 0.05 into g:Profiler, I obtained a total of 157 overrpresented annotated gene sets. The top 20 are displayed below:
+
+```{r, echo=FALSE, fig.cap="*Table 4: Top 20 overrepresented gene sets (and Alzheimers Disease) from the KEGG PATHWAY database given an input query of down-regulated genes from an RNAseq dataset comparing PSEN1 DeltaE9 mutant brain organoids to their isogenic controls. Differential expression analysis was conducted using edgeR's quasi-likelihood model, and up-regulated genes in the gene list were selected based an adjusted p-value threshold (Benjamini-Hochberg correction) of 0.05 and log fold change < 0. Term names, Term IDs, adjusted p-values and their log equivalents, gene set size (T), size of the effective gene list (Q), overlap (T & Q), and the number of genes in the background (U) are displayed as columns. *"}
+knitr::include_graphics(file.path("figures/thresholded_down_KEGG.png"))
+```
+
+Many of enriched gene sets were related to synaptic activity. This was expected, given the wealth literature suggesting a causative link between beta amyloid and synpatic dysregulation. As highlighted in Assignment 2, downregulation of GABA has been associated with the decline in working memory seen in Alzheimer's patients [@mandal2017], and thus it makes sense that "GABAergic synapse" is one of the enriched gene sets.  
+
+Notably, the KEGG ferroptosis gene set was not enriched in the thresholded overrrepresentation analyses for either the up-regulated or down-regulated genes. This suggests that signalling related to ferroptosis, as a whole, is not significantly altered in PSEN1 DeltaE9 mutants in comparison to their isogenic controls.
+
+In assignment 2, I attempted to reconcile the author's other observations supporting ferroptosis with the seemingly insigifnicant enrichment of ferroptosis-related genes in their RNA-seq results. Their metabolic observations of heightened 4-HNE---a byproduct of lipid peroxidation---in PSEN1 DeltaE9 mutants and the reversion of 4-HNE back to wild type upon treatment with ferrostatin (a ferroptosis inhibitor) is strong evidence that ferroptosis was, in fact, up-regulated in the mutants [@majernikova2024]. SAT1, one of the few FRDE genes with high statistical significance and fold change in my analyses, is the rate-limiting enzyme in polyamine catabolism (for lipid peroxidation) [@ou2016activation]; I suggested that the heightened expression of only several genes, SAT1 included, may be sufficient in inducing ferroptosis.
+
+# Non-thresholded Gene Set Enrichment Analysis
+
+## Methods and Gene Sets Used
+
+I have chosen to use GSEA [@subramanian2005gene] for the non-thresholded overrepresentation analysis. I run it using R. The BCB420 docker image provides the jar file for GSEA version 4.3.2: this is the version that I will use for my analysis. 
+
+As mentioned in class, GSEA provides two methods for determining the statistical background. One is based on phenotype permutation, in which the labels of the samples are swapped, fold changes / associated statistical signfiicance values are calculated anew, and new ranked lists are generated for repeated rounds of simulated analysis [@subramanian2005gene]. The other is based on gene set permutation, in which the genes in a pre-ranked list provided to GSEA are randomly assigned gene sets [@subramanian2005gene]. GSEA's methods for fold change and statistical significance determination were originally based on microarray data (in which reads are normally distributed) and are inferior to edgeR's quasi-likelihood model; thus I've chosen to use the gene-set permutation based method. 
+
+The gene-set permutation based method requires a pre-ranked list. I have already created the ranked list file for the PSEN1 DeltaE9 mutant vs. isogenic control differential gene expression analysis and placed it in the Assignment3 folder under the name "GSE266358_ranked_list.rnk." The steps I took to create the ranked list are demonstrated below: 
+
+```{r}
+
+# generate rank scores based on the formula provided in lecture
+qlf_out$rank <- -log(qlf_out$PValue, base = 10) * sign(qlf_out$logFC)
+
+# order qlf_out by decreasing rank (top is most upregulated, bottom is most
+# downregulated)
+qlf_out <- qlf_out[order(qlf_out$rank,decreasing = TRUE),]
+
+# file path for the ranked list of genes
+ranked_list_path <- file.path("GSE266358_ranked_list.rnk")
+
+# if the file has not already been created
+if (! file.exists(ranked_list_path)){
+  
+  # write the gene name and rank into the ranked list file in .tsv format
+  write.table(data.frame("GeneName"=rownames(qlf_out), 
+                         "rank"=qlf_out$rank), 
+              file=ranked_list_path, 
+              sep = "\t", 
+              row.names = FALSE,
+              quote = FALSE)
+}
+
+```
+
+As I used the gene sets contained in KEGG PATHWAYS [@kanehisa2017] for my thresholded overrepresentation analysis in Assignment 2, it would make sense to use KEGG's gene sets here for direct comparison. Unfortunately, however, accessing KEGG's FTP releases requires registration and payment, and the version of the KEGG database used by g:Profiler is not downloadable.
+
+Instead, I have opted to use a collection of human pathway gene sets from Reactome [@gillespie2022reactome], WikiPathways [@agrawal2024wikipathways], etc. (notably excluding GO Biological Process) that I downloaded from the Bader Lab website (available at https://baderlab.org/GeneSets). Like KEGG, WikiPathways has a gene set dedicated towards ferroptosis, allowing me to determine whether the set of ferroptosis-related genes might be up-regulated in PSEN1 DeltaE9 mutants (and if so, would support the original author's claims). The GMT file is present in my Assignment3 folder and is named "Human_AllPathways_noPFOCR_March_01_2025_symbol.gmt", indicative that it came from the most recent release on March 1st. 
+
+To run GSEA in R, I loosely followed the steps of the tutorial that Prof. Isserlin linked to. First, I establish some basic settings:
+
+```{r}
+
+# the path to the GSEA jar file, as set in the BCB420 docker image
+gsea_jar <- "/home/rstudio/GSEA_4.3.2/gsea-cli.sh"
+
+# name of the directory outputted by GSEA
+analysis_name <- "GSE266358_GSEA_analysis_against_all_pathways"
+
+# maximum gene set size -- too large and the gene sets encompass multiple 
+# pathways can become uninformative. Also, GSEA's normalization does not work
+# well with very large datasets
+max_gene_set_size <- 200
+
+# minimum gene set size -- too small and the gene sets may become enrichment 
+# with membership of only a few genes. Also, GSEA's normalization does not work
+# well with very large datasets
+min_gene_set_size <- 15
+
+# GMT file to conduct the GSEA analysis against -- here, I have specified 
+# the most recent pathways GMT file downloaded from the Bader Lab in my 
+# Assignment3 folder
+dest_gmt_file = "Human_AllPathways_noPFOCR_March_01_2025_symbol.gmt"
+
+```
+
+For completeness, I have documented the process that I used to pull the GMT file from the Bader lab website using R here:
+
+```{r}
+
+# basename URL for the pathways GMT file
+gmt_url = "http://download.baderlab.org/EM_Genesets/current_release/Human/symbol/"
+  
+# list all the files on the server
+filenames = getURL(gmt_url)
+tc = textConnection(filenames)
+contents = readLines(tc)
+close(tc)
+
+# get the gmt that has all the (non-Gene Ontology) pathways
+# I have also opted to remove all PFOCR gene sets, which sometimes have names
+# that are a little difficult to parse
+rx = gregexpr("(?<=<a href=\")(Human_AllPathways_noPFOCR_.*.)(.gmt)(?=\">)",
+  contents, perl = TRUE)
+gmt_file = unlist(regmatches(contents, rx))
+
+dest_gmt_file <- file.path(gmt_file)
+
+# download the GMT file if it doesn't already exist in the Assignment3 folder
+if(!file.exists(dest_gmt_file)){
+  download.file(
+    paste(gmt_url,gmt_file,sep=""),
+    destfile=dest_gmt_file
+  )
+}
+
+```
+
+Here's the code chunk for running the GSEA jar file from the command line using the settings set previously. For now, I've set eval to FALSE, as the program can take a while to run all the permutations.
+
+```{r, eval=FALSE}
+
+# GSEA can take a long time due to the large number of gene set permutations
+# here, I have set the code chunk to eval=FALSE
+
+command <- paste("",gsea_jar,  
+                 "GSEAPreRanked -gmx", dest_gmt_file, 
+                 "-rnk" ,file.path(ranked_list_path), 
+                 "-collapse false -nperm 1000 -scoring_scheme weighted", 
+                 "-rpt_label ",analysis_name,
+                 "  -plot_top_x 20 -rnd_seed 12345  -set_max", max_gene_set_size,  
+                 " -set_min", min_gene_set_size, " -zip_report false ",
+                 " -out" ,wd, 
+                 " > gsea_output.txt",sep=" ")
+system(command)
+
+```
+
+Output data from one of the previous iterations of GSEA that I've ran can be found in the folder titled: "GSE266358_GSEA_analysis_against_all_pathways.GseaPreranked.1743380880503". I use the data in this folder (in particular, the "gsea_report_for_na_neg..." and "gsea_report_for_na_pos" files) for the downstream analysis.
+
+## Enrichment Results and Comparison to Thresholded Analysis
+
+### Up-Regulated Gene Sets
+
+Here are the top 10 up-regulated gene sets (by normalized enrichment score) from the GSEA analysis of PSEN1 DeltaE9 mutants vs their isogenic controls (up-regulated meaning heightened expression in the mutant):
+
+```{r, echo=FALSE, fig.cap="*Table 5: Top 10 overrepresented, upregulated gene sets from the Bader Lab pathways collection (minus GO, minus PFOCR, March 1st 2025 release) using GSEA thresholded overrepresentation analysis given a pre-ranked list of genes from an RNAseq dataset comparing PSEN1 DeltaE9 mutant brain organoids to their isogenic controls. Differential expression analysis was conducted using edgeR's quasi-likelihood model. Rank for each gene was determined by multiplying the negative log (base 10) of the p-value against the sign of the fold change. Gene set description and database origin (GS), size, enrichment score (ES), normalized enrichment score (NES), p-value, FDR, FWER, rank at max, and other leading edge statstitics are provided as columns. *"}
+knitr::include_graphics(file.path("figures/GSEA_top10_upregulated_sets.png"))
+```
+
+Interestingly enough, gene sets related to all stages of mRNA translation and protein synthesis---from initiation and ribosomal assembly to elongation to termination---are up-regulated. In fact, protein synthesis-related gene sets occupy the entirety of the top 10. This is corroborated fairly well by existing literature, though the conclusions of such studies are admittedly quite complex. Based on gene and protein expression studies, one paper in 2016 suggested that a range of translational-related proteins were abnormally expressed through the different stages of Alzheimer's disease [@hernandez2016altered]. Another paper in 2020 confirmed this finding, suggesting that protein translation control in Alzheimer's was biphasic, characterized by a heightened synthesis of proteins contributing to pathology in early stages and severely diminished translation activity later on (leading to widespread neurodegeneration) [@ghosh2020alzheimer]. Given the immature nature of the brain organoid samples on which the RNA-seq was conducted in the original Alzheimer's-ferroptosis study (aged around 50 days old) [@majernikova2024], it makes sense that the PSEN1 DeltaE9 mutants exhibited characteristics representative of earlier-stage Alzheimer's, hence the up-regulation of translation-related gene sets. 
+
+#### Comparison between Thresholded and Non-thresholded Analysis:
+
+As gene sets from the KEGG pathways database could not be used for the GSEA analysis, comparison between the results here and the thresholded analysis in Assignment 2 (shown in table 3) inherently cannot be straightforward. It is possible (and perhaps very likely) that KEGG has classified many of its gene sets differently from Reactome, WikiPathways and the others even if under similar names. Furthermore, KEGG may have some unique gene sets and vice versa.
+
+At first glance, none of the top 20 enriched gene sets from the thresholded analysis _(Table 3)_ appear comparable to the top 10 from the GSEA analysis. None of them are related to heightened mRNA translation; in fact, "Valine, leucine and isoleucine degradation" are enriched. Furthermore, none of the top 10 from the non-thresholded analysis are related to cancer. This may partially be a result of the gene set size filtering in GSEA: the gene set "Pathways in cancer", which scores first in the thresholded overrepresentation analysis, contains 527 genes (Table 3). Similar cancer-related datasets in Reactome, WikiPathways are also large and would likely have been filtered out. However, it is strange that smaller cancer gene sets are also not enriched in the non-thresholded analysis. 
+
+Considering the different mechanisms of the thresholded vs. non-thresholded approach, it is possible that the FDR threshold of 0.05 used in Assignment 2 inadvertently biased the enrichment of cancer-related subsets. Perhaps a large number of cancer-related genes scored just above the threshold, but this sort of explanation seems less reasonable than one along the lines of KEGG simply being quite different in its gene set content and composition compared to WikiPathways, Reactome, etc. 
+
+One thing that the thresholded and non-thresholded apporaches both (unfortunately) agree on is the lack of enrichment of ferroptosis related gene sets. For the non-thresholded up-regulated gene set analysis via GSEA, the WikiPathways ferroptosis gene set had an FDR above 0.7 (see the "gsea_report_for_na_pos..." file for details). 
+
+### Downregulated Gene Sets
+
+Here are the top 10 up-regulated gene sets (by normalized enrichment score) from the GSEA analysis of PSEN1 DeltaE9 mutants vs their isogenic controls (down-regulated meaning decreased expression in the mutant):
+
+```{r, echo=FALSE, fig.cap="*Table 6: Top 10 overrepresented, downegulated gene sets from the Bader Lab pathways collection (minus GO, minus PFOCR, March 1st 2025 release) using GSEA thresholded overrepresentation analysis given a pre-ranked list of genes from an RNAseq dataset comparing PSEN1 DeltaE9 mutant brain organoids to their isogenic controls. Differential expression analysis was conducted using edgeR's quasi-likelihood model. Rank for each gene was determined by multiplying the negative log (base 10) of the p-value against the sign of the fold change. Gene set description and database origin (GS), size, enrichment score (ES), normalized enrichment score (NES), p-value, FDR, FWER, rank at max, and other leading edge statstitics are provided as columns.  *"}
+knitr::include_graphics(file.path("figures/GSEA_top10_downregulated_sets.png"))
+```
+
+As anticipated, gene sets related to synapse and neurotransmittor activity are highly enriched amongst down-regulated genes. In fact, all of the top 10 are related to neurotransmittor receptors. The phenomenon in which all the top gene sets correspond to roughly the same category seem to be a result of the redundancy of the GMT file used --- lots of (though not all) gene sets from the different databases seem to overlap quite significantly. 
+
+More specifically, gene sets related to NMDA and AMPA receptors (subtypes of glulamate receptors involved in synaptic plasticity and learning) [@zhou2013nmda], GABA receptors (involved in working memory) [@zhang2022], and general synaptic activity are all enriched, corresponding very well with existing literature that draws connections between defects in the above receptor types and neurodegeneration characteristic of Alzheimer's disease [@zhang2022]. 
+
+#### Comparison between Thresholded and Non-thresholded Analysis
+
+Here, the thresholded analysis (data shown in table 4) and non-thresholded analysis are a little more comparable. "Dopaminergic synapse," "Neuroactive ligand-receptor interaction" and "GABAergic synapse" are some of the KEGG gene sets enriched in the thresholded overrepresentation analysis (Table 4) that correspond well with the results from the non-thresholded analysis. 
+
+As for the rest, it is again difficult to compare in a straightforward way due to underlying differences between KEGG (used for the overrepresentation analysis via g:Profiler) and WikiPathways, Reactome, PANTHER and the rest. A comparable gene set to KEGG's "salivary secretion" (top 2 in the thresholded overrepresentation analysis) does not appear anywhere in the top 700 gene sets for GSEA analysis (see "gsea_report_for_na_neg..." in the GSEA results folder), and KEGG may have quite a few other unique gene sets that do not correspond well with the other databases.
+
+# Visualizing the Gene Set Enrichment Analysis in Cytoscape
+
+## Creating an Enrichment Map
+
+Now, I visualize the results from the non-thresholded gene set using Cytoscape with the help of EnrichmentMap [@merico2010enrichment] [@reimand2019pathway]. When prompted, I inputted the "gsea_report_for_na_neg..." and "gsea_report_for_na_pos" files from the "GSEA266358_GSEA_analysis..." directory as the "Enrichments Pos" and "Enrichments Neg" files, respectively. Additionally, I inputted Bader Lab GMT file and ranked list that I generated earlier. In terms of thresholds, I used FDR < 0.01 as the node (gene set) cutoff and similarity index > 0.375 as the edge (overlap) cutoff. The FDR cutoff was partly a result of experimentation; too many singleton gene sets appeared when I set the FDR cutoff higher, cluttering the graph. 
+
+The resultant graph contained 83 nodes (each representing a gene set) and 1109 edges (each representing a gene overlap with another gene set). The original graph, prior to any manual layout or style adjustments was as follows:
+
+```{r, echo=FALSE, fig.cap="*Figure 3: A rough Enrichment Map representing enriched gene sets as nodes and overlap between gene sets as edges in the context of differential gene expression analysis between PSEN1 DeltaE9 Brain Organoid Mutants and their isogenic controls. The map contains a total of 83 enriched gene sets (each meeting an FDR cutoff of 0.01) and 1109 edges representing their overlap (if their similarity index is greater than 0.375). Non-thresholded overrepresentation analysis with GSEA was used to determine enriched gene sets, in which the input ranked list of genes was obtained by multiplying the negative logarithm of each gene's p-value against the sign of their fold-change. Fold changes and associated statistical significance measures were initially determined by edgeR's quasi-likelihood method. This map uses the default stlye settings immediately after the data is initially loaded into Enrichment Map. Gene sets enriched in upregulated genes (highly expressed in PSEN1 Delta E9 mutants) are coloured orange, while genes enriched in downregulated genes are coloured blue.   *"}
+knitr::include_graphics(file.path("figures/initial_EM_with_label.png"))
+```
+
+Unfortunately, in this initial iteration of the Enrichment Map, there is quite a bit of gene set description label overlap. Furthermore, the sizes of each gene set are a little difficult to discern (due to the lack of size ranges) and the quantity of overlap between gene sets is hard to tell (again, due to limited variability in the width). The edge colour is the same colour as the down-regulated enriched gene set, which might also cause a bit of confusion.
+
+## Annotating the Network
+
+I annotated the network and changed some of the network styles to make it more readable. 
+
+I altered/kept the styling of each gene set node as follows:
+
+* I kept the fill colour styling, which was a continuous mapping to the normalized enrichment score (NES) with a blue to red colour gradient. The minimum and maximum were maintained at NES = -2.5 and NES = 2.5, respectively. 
+
+* I changed the size styling. I maintained the continuous mapping to gene set size, but changed the minimum gene set size of 17 to be displayed as a node size of "15", and changed the maximum gene set size of 280 to be displayed as a node size of "60". This kept make the size differences between gene sets a little more clear than before
+
+* I kept the shape of the nodes as a circle (default)
+
+* I kept a border width of 1 and kept border paint colour as black (the defaults)
+
+* I increased the font size to 18 to improve readability 
+
+* I kept the label mapping to "gene set description"
+
+I altered/kept the styling of each edgee as follows:
+
+* I changed the edge width styling. I changed the continuous mapping to "overlap size" rather than "similarity coefficient", so that widths corresponded better with the absolute magnitude of overlap. I set the minimum overlap size of 13 to an edge width size of 3, and set the maximum overlap size of 134 to an edge width size of 25.
+
+* I changed the edge colour from blue to light gray. This helped better establish "blue" as the colour representing down-regulated gene sets.
+
+* I kept the default transparency (200)
+
+* I kept the default label settings (no labels)
+
+Lastly, I chose the yfiles circular layout as the automatic underlying layout. This helped push each node farther away (so that the gene description labels would display better) and organize high-degree networks into circles. 
+
+## Publication-Ready Figure
+
+After changing the style settings as described in the above section, I created the publication-ready figure by manually moving around the nodes so that their gene description labels did not overlap. Furthermore, I arranged down-regulated gene sets together (to the right and down) and up-regulated gene sets together (to the left and up). I omitted several gene description labels (for some gene sets related to protein synthesis and mRNA translation) that overlapped no matter the font size and arrangements that I used. The final result is as follows:
+
+```{r, echo=FALSE, fig.cap="*Figure 4: A Publication-Ready Enrichment Map representing enriched gene sets as nodes and overlap between gene sets as edges in the context of differential gene expression analysis between PSEN1 DeltaE9 Brain Organoid Mutants and their isogenic controls. The map contains a total of 83 enriched gene sets (each meeting an FDR cutoff of 0.01) and 1109 edges representing their overlap (if their similarity index is greater than 0.375). Non-thresholded overrepresentation analysis with GSEA was used to determine enriched gene sets, in which the input ranked list of genes was obtained by multiplying the negative logarithm of each gene's p-value against the sign of their fold-change. Fold changes and associated statistical significance measures were initially determined by edgeR's quasi-likelihood method. The automatic circular layout feature from yfiles was used to space the nodes out and group them as circular clusters. Gene set size, edge width, and font size were also adjusted to differ from the the default style settings Gene sets enriched in upregulated genes (highly expressed in PSEN1 Delta E9 mutants) are coloured orange, while genes enriched in downregulated genes are coloured blue.   *"}
+knitr::include_graphics(file.path("figures/EM_publication_ready_with_label.png"))
+```
+
+Within this layout, clusters of enriched gene sets sharing the same broad theme are highly apparent. There is such an abundance of up-regulated gene sets related to protein synthesis and mRNA translation to the point that they form one enormous circle, interconnected so densely that each individual edge cannot be discerned. A cluster of down-regulated gene sets related to synaptic activity to the right of the figure is also apparent. There is less overlap between them, and each individual edge can still be seen quite clearly. 
+
+## Theme Network
+
+I created the theme network with the help of AutoAnnotate [@kucera2016autoannotate]. More specifically, I set the amount of clusters to larger, and auto-generated theme names with the "WordCloud app (most frequent words in cluster)" setting. After removing the individual gene set description labels, I realized I no longer needed a circular layout, and opted instead for the yfiles organic layout. After some manual adjustment, the theme network has the following appearance:
+
+```{r, echo=FALSE, fig.cap="*Figure 5: A theme network collapsing enriched gene set clusters in the context of differential gene expression analysis between PSEN1 DeltaE9 Brain Organoid Mutants and their isogenic controls. The collapsed network and theme names were created with AutoAnnotate (using the WordCloud app feature). Enriched gene sets (FDR cutoff of 0.01) are represented as nodes (now without labels) and overlap between gene sets(sinilarity index greater than 0.375) are represented as edges  Non-thresholded overrepresentation analysis with GSEA was used to determine enriched gene sets. The organic layout from yfiles was first used to automatically space out the nodes, followed by manual adjustment. Gene set size, edge width, and font size were also adjusted to differ from the the default style settings. Gene sets enriched in upregulated genes (highly expressed in PSEN1 Delta E9 mutants) are coloured orange, while genes enriched in downregulated genes are coloured blue.   *"}
+knitr::include_graphics(file.path("figures/theme_network_with_labels.png"))
+```
+
+As expected, the largest theme by far is "synthesis protein translation complex", containing a large number of up-regulated gene sets related to mRNA translation and protein synthesis (the top 10 that I described in depth in the non-thresholded analysis discussion are all in this theme). Given the altered levels of protein synthesis and mRNA translation within Alzheimer's patients [@hernandez2016altered] [@ghosh2020alzheimer] (as first described in the non-thresholded analysis section), the theme fits the model well. The second largest theme is "nmda activation receptor transmission" corresponding to down-regulated gene sets related to synaptic activity and NMDA, AMPA signalling pathways. Since Alzheimer's disease is associated with neurodgeneration and loss of synaptic activity [@zhang2022], this again tracks well. 
+
+Some novel pathways include "notch4 domain intracellular transcription" and "runx2 regulates osteoblast differentation." The former somewhat relates to early embryonic cell development (containing the gene set "gastrulation"), while the latter relates to bone differentiation [@komori2019regulation]. Given the generation of the brain organoids in the original study from iPSCs, this makes sense. 
+
+Other small themes (containing down-regulated gene sets) further correspond to neurotransmitter activity and fit well within the expected themes for Alzheimer's.
+
+# Interpretation and Detailed View of Results
+
+## Discussion of enrichment results in the context of the original paper and broader literature regarding Alzheimer's
+
+As discussed in the non-thresholded overrepresentation analysis section of this assignment---in which I mentioned that gene sets for ferroptosis scored poorly for both thresholded and non-thresholded overrepresented analysis---, it is fairly clear that overall, ferroptosis-related genes are not significantly perturbed, going against the author's findings. 
+
+On the positive side, the RNA-seq results do, at least, correspond quite well with existing Alzheimer's research, suggesting that the brain organoid models developed (PSEN1 DeltaE9 mutants against isogenic controls) are adequate models for the Alzheimer's phenotype. Most notably, enriched gene sets related to synaptic activity and neurotransmitter receptor function were significantly down-regulated. This makes sense given the well-known mechanistic nature by which the PSEN1 DeltaE9 mutant induces pathology, described here as follows. PSEN1 is the catalytic subunit of the gamma-secretase complex responsible for cleaving amyoid percursor protein (APP) into beta-amyloid [@woodruff2013]. The DeltaE9 variant of PSEN1 is dominant negative and "poisons" the complex to promote the formation of the toxic beta-amyloid variant "AB42" [@woodruff2013]. High serum levels of AB42 have been correlated with synpatic dysfunction, inducing: 
+
+* NMDA-type receptor-synapse depression. [@liu2019role] This corresponds well with the enriched, down-regulated gene sets in the non-thresholded analysis relating to all aspects of NMDA receptor activity, as well as the broad theme of "nmda activation receptor transmission" that emerged in the theme network. 
+
+* Dysregulation of the GABA system. Reductions in GABA have been well established to induce cognitive impairment and working memory issues, and low levels are often described in severe Alzheimer's cases. This corresponds well with the gene sets "GABA receptor signalling" and "GABA receptor activation" present among the 10 most enriched, down-regulated gene sets in the non-thresholded anlysis. Reduced GABA levels have also been linked to ADHD and autism [@edden2012reduced], and the likely overlap between the GABA-related and ADHD/autism pathways explains the emergence of "gaba adhd autism" in the theme network. 
+
+* Long-term (synpatic) depression as result of increased AMPA receptor endocytosis. [@babaei2021nmda] This corresponds well with the emergence of "ampa plasticity trafficking receptors" in the theme network, as well as the individual AMPA-related gene sets that scored in the top 10 enriched, down-regulated gene sets from non-thresholded analysis.
+
+* Dysregulation of the dopaminergic [@pan2019dopamine] and serotonin-related [@yun2015serotonin] systems, corresponding well with the "release cycle neurotransmitter reuptake" theme present in the theme network. 
+
+The significant up-regulation of protein synthesis and mRNA-translation associated gene sets (via non-thresholded analysis) and emergence of "synthesis protein translation complex" in the theme network allow us to further characterize the nature of the DeltaE9 mutant brain organoids used in the original study. Existing literature suggests that translational control in Alzheimer's is biphasic, with highly up-regulated synthesis of pathology-inducing proteins in early Alzheimer's followed by dampened translation and widespread neurodegeneration in later stages. If we apply the results from this study here, it tentatively suggests that the brain organoids on which RNA-seq was conducted in the original study by Majernika et al. likely exhibited a phenotype specifically similar to early-stage Alzheimer's disease. 
+
+In the original Alzheimer's-ferroptosis paper by Majernikova et al. from which the RNA-seq dataset was taken, the authors do mention that ferroptosis activity varies significantly by Alzheimer's disease stage [@majernikova2024]. From publically available snRNA-seq datasets, they determined that early stages of Alzheimer's disease showed diminished ferroptosis-related gene expression [@majernikova2024]. Thus, it is possible that ferroptosis-related gene sets were not enriched in our analysis purely because of the immature nature of the brain organoids from which the bulk RNA-seq samples were taken. 
+
+The results from the non-thresholded analysis correspond reasonably with the thresholded overrepresentation analysis conducted in Assignment 2. Both agree on the lack of enrichment in ferroptosis-related gene sets as well as the down-regulation of gene sets related to synaptic transmission and receptor activation (Tables 4, 6). However, they somewhat disagree on the enriched, up-regulated gene sets. The top gene sets from my non-thresholded GSEA analysis---centred around translation and protein synthesis---differ from the cancer-related gene sets that were the most overrepresented from results obtained via g:Profiler (Tables 3, 5). As stated previously, I attribute this to the different annotation databases used: KEGG likely defines its cancer gene sets differently from Reactome, WikiPathways, and the rest, and it is unfortunate that I could not obtain access to KEGG for the non-thresholded analysis via GSEA for a more direct comparison. 
+
+It is important to note that, counterintuitive to everything previously mentioned, the original authors demonstrated concrete metabolic evidence for heightened ferroptosis-related activity in the 50 day brain organoid mutants from which the bulk RNA-seq samples were taken [@majernikova2024]. As also mentioned in Assignment 2, The PSEN1 deltaE9 organoids featured significantly greater levels of 4-HNE, a byproduct of lipid peroxidation, and, treatment with ferrostatin (a ferroptosis inhibitor) was sufficient to revert 4-HNE leveks back to wild type. Additionally, ferritin levels were down-regulated in the mutants (in which greater cytosolic iron is associated with ferroptosis), but also reverted back up once ferrostatin was induced. To reconcile the negative RNA-seq GSEA results with this positive metabolic evidence, perhaps the up-regulation a limited set of genes is sufficient to induce ferroptosis in Alzheimer's associated cells. To investigate this further, I have chosen to investigate the ferroptosis pathway (WikiPathways version) in greater detail. 
+
+## Investigating the Ferroptosis Pathway from WikiPathways (option 2)
+
+To potentially reconcile the positive metabolic evidence for ferroptosis in PSEN1 DeltaE9 mutants presented by the authors in the original paper with the non-enrichment of ferroptosis-related gene sets in both my thresholded/non-thresholded overrepresentation analyses, I have chosen to investigate the ferroptosis pathway in greater detail. 
+
+I obtained the WikiPathways version of the ferroptosis pathway using the WikiPathways app on Cytoscape [@kutmon2014wikipathways]. I annotated the network with the original ranks of each gene determined by multiplying the negative logarithm of their p-values against the sign of their fold change. The bluer the gene, the more down-regulated it is in PSEN1 DeltaE9 mutants. The redder the gene, the more up-regulated it is in the mutants. Here is the complete, annotated pathway: 
+
+```{r, echo=FALSE, fig.cap="*Figure 6: The WikiPathways Ferroptosis Pathway, annotated in the context of differential gene expression analysis between PSEN1 DeltaE9 Brain Organoid Mutants and their isogenic controls. Each gene is annotated by its rank, obtained from multiplying the negative logarithm of its p-value against the sign of its fold-change. Fold changes and associated statistical significance measures were determined by edgeR's quasi-likelihood method. Genes with greater rank (and which are up-regulated in PSEN1 DeltaE9 brain organoid mutants) are coloured more orange, whereas genes with lower rank (and which are down-regulated in PSEN1 DeltaE9 brain organoid mutants) are coloured more blue. Non-differentially expressed genes are coloured grey.  *"}
+knitr::include_graphics(file.path("figures/Ferroptosis - Homo sapiens_revised_coloured.png"))
+```
+
+This is quite a complex pathway. To make the analysis a little more simple, I'll break things into chunks. Examining the bottom-most section of the pathway (close to the "ferroptosis" node), we see the following:
+
+```{r, echo=FALSE, fig.cap="*Figure 7: Bottom Subsection of the WikiPathways Ferroptosis Pathway, annotated in the context of differential gene expression analysis between PSEN1 DeltaE9 Brain Organoid Mutants and their isogenic controls. Each gene is annotated by its rank, obtained from multiplying the negative logarithm of its p-value against the sign of its fold-change. Fold changes and associated statistical significance measures were determined by edgeR's quasi-likelihood method. Genes with greater rank (and which are up-regulated in PSEN1 DeltaE9 brain organoid mutants) are coloured more orange, whereas genes with lower rank (and which are down-regulated in PSEN1 DeltaE9 brain organoid mutants) are coloured more blue. Non-differentially expressed genes are coloured grey.  *"}
+knitr::include_graphics(file.path("figures/ferroptosis_pathway_bottom.png"))
+```
+
+Notably, GCH1, AKR1C1, AKR1C2 and CoQ2 are down-regulated. All of them are inhibitors of apoptosis:
+
+* GCH1 is the rate-limiting enzyme for BH4 synthesis, and blockade of the GCH1/BH4 axis induces ferroptosis [@hu2022blockade]
+
+* AKR1C1 and AKR1C2 are aldo-keto reductase enzymes, and knockouts promote ferroptosis [@huang2021ferroptosis]
+
+* From the diagram, CoQ2 produces CoQ10, which inhibits ROS production. As ROS production help activate ferroptosis, downregulation of CoQ2 promotes ferroptosis.
+
+Remarkably, the changes in expression levels here are consistent with heightened ferroptosis. 
+
+Next, I examine the left section of the pathway:
+
+```{r, echo=FALSE, fig.cap="*Figure 8: Left Subsection of the WikiPathways Ferroptosis Pathway, annotated in the context of differential gene expression analysis between PSEN1 DeltaE9 Brain Organoid Mutants and their isogenic controls. Each gene is annotated by its rank, obtained from multiplying the negative logarithm of its p-value against the sign of its fold-change. Fold changes and associated statistical significance measures were determined by edgeR's quasi-likelihood method. Genes with greater rank (and which are up-regulated in PSEN1 DeltaE9 brain organoid mutants) are coloured more orange, whereas genes with lower rank (and which are down-regulated in PSEN1 DeltaE9 brain organoid mutants) are coloured more blue. Non-differentially expressed genes are coloured grey.  *"}
+knitr::include_graphics(file.path("figures/ferroptosis_pathway_left.png"))
+```
+
+Quite a few genes are upregulated here. Many of these upregulated genes contribute to a pathway starting from cystolic iron accumulation and ending off at ferritin degradation, including:
+
+* SLC39A14 and SLC39A8, which, from the diagram, appear to be responsible for increasing cytosolic iron levels
+
+* PCBP1 and PCBP2, which are iron chaperones. [@patel2021iron]
+
+* FTH1 and FTl, the ferritin light and heavy chains responsible for storing iron [@bertoli2019ferritin]
+
+* NCOA4, which mediates the degradation of ferritin and induces ferritinophagy (related to ferroptosis) [@santana2021role]
+
+This suggests that in the PSEN1 DeltaE9 mutants, there is a significant overall increase in iron metabolism and transport, with heightened iron accumulation, storage, and degradation all at once. However, given the upregulation of FTH1 and FTL, the evidence here does not quite correspond with the decreased ferritin levels observed in the PSEN1 mutants by the authors in the original paper. Perhaps up-regulation of NCOA4 alone is sufficient in inducing widespread ferritinophagy, but the literature regarding this is unclear. 
+
+Lastly, I examine the right subsection of the pathway:
+
+```{r, echo=FALSE, fig.cap="*Figure 9: Right Subsection of the WikiPathways Ferroptosis Pathway, annotated in the context of differential gene expression analysis between PSEN1 DeltaE9 Brain Organoid Mutants and their isogenic controls. Each gene is annotated by its rank, obtained from multiplying the negative logarithm of its p-value against the sign of its fold-change. Fold changes and associated statistical significance measures were determined by edgeR's quasi-likelihood method. Genes with greater rank (and which are up-regulated in PSEN1 DeltaE9 brain organoid mutants) are coloured more orange, whereas genes with lower rank (and which are down-regulated in PSEN1 DeltaE9 brain organoid mutants) are coloured more blue. Non-differentially expressed genes are coloured grey.  *"}
+knitr::include_graphics(file.path("figures/ferroptosis_pathway_right.png"))
+```
+
+Here, we clearly see the up-regulation of TP53, SAT1 and SAT2. SAT1 is the rate-limiting enzyme in the polyamine catabolism necessary for lipid peroxidation (which contributes to ferroptosis)[@ou2016activation]. As seen in the above diagram, SAT1 is a target of p53, and it encouraging to see that both are highly expressed in the PSEN1 DeltaE9 brain organoids. 
+
+Unfortunately, clear patterns in gene expression changes were not quite discernable in the rest of the pathway diagram. 
+
+It is possible that altered gene expression of the select few pathways related to ferroptosis examined (e.g., the lipid peroxidation pathway through SAT1, ferritin degration through NCOA4, down-regulated inhibitors of apoptosis) is sufficient in inducing the ferroptosis-related metabolic changes seen by the authors, but, as reiterated previously, further experiments need to be conducted and stronger evidence needs to be collected to make any definite conclusions. 
+
+# Mapping sections to questions
+
+Assignment 3 is split into three major sections: "Non-thresholded Gene Set Enrichment Analysis", "Visualizing the Gene Set Enrichment Analysis in Cytoscape", and "Interpretation and Detailed View of Results." They correspond to the major question groups listed on the assignment page. The question that each subsection refers to is indicated in its heading. 
+
+# References
+
